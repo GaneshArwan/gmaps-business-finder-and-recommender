@@ -34,16 +34,17 @@ def init_nltk():
 init_nltk()
 
 # Data Class Bisnis (Updated dengan Field Lengkap)
-# GANTI BAGIAN CLASS BUSINESS DENGAN INI:
+# --- UPDATE DI BAGIAN ATAS (Business Class) ---
 @dataclass
 class Business:
     name: str = ""
-    rating: str = ""    # Baru
-    category: str = ""  # Baru
-    address: str = ""   # Baru
-    phone: str = ""     # Baru
+    rating: str = ""
+    category: str = ""
+    address: str = ""
+    phone: str = ""
     website: str = ""
-    url: str = ""
+    url: str = ""          # Long Link (URL Browser)
+    share_link: str = ""   # Short Link (maps.app.goo.gl) -> BARU
     scraped_at_utc: str = ""
 
 # Kata kunci ulasan
@@ -67,38 +68,61 @@ def safe_get_attribute(driver, selector, attr):
     try: return driver.find_element(By.CSS_SELECTOR, selector).get_attribute(attr)
     except: return ""
 
-# --- FUNGSI HELPER EKSTRAKSI (Shared Logic) ---
 def extract_business_info(driver):
-    """Mengambil detail bisnis dari halaman yang sedang aktif"""
+    """Mengambil detail bisnis TERMASUK Short Link dari tombol Share"""
+    info = {
+        "name": "", "rating": "", "category": "", 
+        "address": "", "phone": "", "website": "", "share_link": ""
+    }
+    
     try:
-        # Tunggu elemen utama muncul (Nama Bisnis)
+        # Tunggu Nama Bisnis
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "h1.DUwDvf")))
         
-        name = safe_get_text(driver, "h1.DUwDvf")
-        rating = safe_get_text(driver, "div.F7nice span[aria-hidden='true']")
-        category = safe_get_text(driver, "button.DkEaL")
+        info["name"] = safe_get_text(driver, "h1.DUwDvf")
+        info["rating"] = safe_get_text(driver, "div.F7nice span[aria-hidden='true']")
+        info["category"] = safe_get_text(driver, "button.DkEaL")
         
         # Alamat
         address = safe_get_attribute(driver, 'button[data-item-id="address"]', "aria-label")
-        address = address.replace("Address: ", "").replace("Alamat: ", "") if address else ""
+        info["address"] = address.replace("Address: ", "").replace("Alamat: ", "") if address else ""
         
         # Telepon
         phone = safe_get_attribute(driver, 'button[data-item-id*="phone"]', "aria-label")
-        phone = phone.replace("Phone: ", "").replace("Telepon: ", "") if phone else ""
+        info["phone"] = phone.replace("Phone: ", "").replace("Telepon: ", "") if phone else ""
         
         # Website
-        website = safe_get_attribute(driver, 'a[data-item-id="authority"]', "href")
+        info["website"] = safe_get_attribute(driver, 'a[data-item-id="authority"]', "href")
         
-        return {
-            "name": name,
-            "rating": rating,
-            "category": category,
-            "address": address,
-            "phone": phone,
-            "website": website
-        }
+        # --- LOGIKA BARU: AMBIL SHORT LINK ---
+        try:
+            # 1. Cari Tombol Share (Bisa bahasa Indo 'Bagikan' atau Inggris 'Share')
+            # Kita cari tombol yang punya data-value="Share" atau icon share
+            share_btn = driver.find_elements(By.CSS_SELECTOR, "button[data-value='Share'], button[aria-label*='Bagikan'], button[aria-label*='Share']")
+            
+            if share_btn:
+                # Klik tombol share
+                driver.execute_script("arguments[0].click();", share_btn[0])
+                
+                # 2. Tunggu Dialog Muncul & Cari Input Link
+                # Input biasanya ada di dalam dialog modal
+                wait = WebDriverWait(driver, 3)
+                input_el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog'] input.vrsrZe")))
+                
+                # 3. Ambil value dari input
+                short_link = input_el.get_attribute("value")
+                info["share_link"] = short_link
+                
+                # (Opsional) Tutup dialog dengan tekan ESC atau klik tutup, 
+                # tapi karena kita akan navigasi ke URL lain/quit setelah ini, tidak wajib.
+        except Exception as e:
+            # Jangan biarkan error share link menghentikan scraping data lain
+            pass
+
     except:
         return None
+        
+    return info
 
 # --- SCRAPER TAB 1: INPUT LINK LANGSUNG (Updated) ---
 def scrape_single_url_detailed(url):
@@ -120,6 +144,7 @@ def scrape_single_url_detailed(url):
                 phone=details['phone'],
                 website=details['website'], 
                 url=driver.current_url,
+                share_link=details['share_link'],
                 scraped_at_utc=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             )
     finally: driver.quit()
@@ -189,6 +214,7 @@ def scrape_search_results(query, city="", country="", lat="", lon="", limit=5):
                         phone=details['phone'],
                         website=details['website'],
                         url=url,
+                        share_link=details['share_link'],
                         scraped_at_utc=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     ))
             except Exception as e:
@@ -549,6 +575,7 @@ with tab1:
                 "phone": "📞 Telepon",
                 "address": "🏠 Alamat",
                 "url": st.column_config.LinkColumn("Maps Link"), 
+                "share_link": st.column_config.LinkColumn("🔗 Short Link (Share)"),
                 "website": st.column_config.LinkColumn("Website")
             },
             width="stretch" 
