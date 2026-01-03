@@ -13,28 +13,40 @@ from collections import Counter
 import nltk
 from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
+from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
+from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 from dataclasses import dataclass, asdict
 
-# --- KONFIGURASI AWAL ---
-st.set_page_config(page_title="MapInsight Pro Scraper", layout="wide")
+# --- INITIAL CONFIGURATION ---
+st.set_page_config(page_title="MapInsight Pro — Places & Reviews", layout="wide")
 
-# Konfigurasi Logger
+# Logger Configuration
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(sys.stdout)])
 log = logging.getLogger("scraper")
 
-# Inisialisasi NLTK
+# Initialize NLTK
 @st.cache_resource
-def init_nltk():
+def init_nlp_resources():
     try:
         nltk.download('stopwords', quiet=True)
         nltk.download('punkt', quiet=True)
         nltk.download('punkt_tab', quiet=True)
     except LookupError: pass
 
-init_nltk()
+    # 2. SASTRAWI
+    # Stemmer is heavy, so we cache it
+    stemmer_factory = StemmerFactory()
+    stemmer = stemmer_factory.create_stemmer()
+    
+    # Sastrawi Stopwords (Excellent for Indonesian)
+    stop_factory = StopWordRemoverFactory()
+    sastrawi_stops = set(stop_factory.get_stop_words())
+    
+    return stemmer, sastrawi_stops
 
-# Data Class Bisnis (Updated dengan Field Lengkap)
-# --- UPDATE DI BAGIAN ATAS (Business Class) ---
+STEMMER, SASTRAWI_STOPS = init_nlp_resources()
+
+# Business Data Class
 @dataclass
 class Business:
     name: str = ""
@@ -43,23 +55,22 @@ class Business:
     address: str = ""
     phone: str = ""
     website: str = ""
-    url: str = ""          # Long Link (URL Browser)
-    share_link: str = ""   # Short Link (maps.app.goo.gl) -> BARU
+    url: str = ""          # Long Link (Browser URL)
+    share_link: str = ""   # Short Link (maps.app.goo.gl)
     scraped_at_utc: str = ""
 
-# Kata kunci ulasan
+# Review Keywords (Kept multi-language for scraping robustness)
 REVIEW_WORDS = {
     "ulasan", "reviews", "review", "tinjauan", "reseñas", "avis", "bewertungen", "recensioni"
 }
 BAD_WORDS = {"tulis", "write", "nulis", "add", "tambahkan", "crear", "schreiben"}
 
-# --- FUNGSI HELPER ---
+# --- HELPER FUNCTIONS ---
 def get_driver(headless=True):
     driver = Driver(uc=True, headless=headless, incognito=True)
     driver.set_window_size(1400, 900)
     return driver
 
-# GANTI/TAMBAHKAN FUNGSI HELPER INI:
 def safe_get_text(driver, selector):
     try: return driver.find_element(By.CSS_SELECTOR, selector).text.strip()
     except: return ""
@@ -69,54 +80,52 @@ def safe_get_attribute(driver, selector, attr):
     except: return ""
 
 def extract_business_info(driver):
-    """Mengambil detail bisnis TERMASUK Short Link dari tombol Share"""
+    """Extracts business details INCLUDING Short Link from the Share button"""
     info = {
         "name": "", "rating": "", "category": "", 
         "address": "", "phone": "", "website": "", "share_link": ""
     }
     
     try:
-        # Tunggu Nama Bisnis
+        # Wait for Business Name
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "h1.DUwDvf")))
         
         info["name"] = safe_get_text(driver, "h1.DUwDvf")
         info["rating"] = safe_get_text(driver, "div.F7nice span[aria-hidden='true']")
         info["category"] = safe_get_text(driver, "button.DkEaL")
         
-        # Alamat
+        # Address
         address = safe_get_attribute(driver, 'button[data-item-id="address"]', "aria-label")
-        info["address"] = address.replace("Address: ", "").replace("Alamat: ", "") if address else ""
+        if address:
+            info["address"] = address.replace("Address: ", "").replace("Alamat: ", "")
         
-        # Telepon
+        # Phone
         phone = safe_get_attribute(driver, 'button[data-item-id*="phone"]', "aria-label")
-        info["phone"] = phone.replace("Phone: ", "").replace("Telepon: ", "") if phone else ""
+        if phone:
+            info["phone"] = phone.replace("Phone: ", "").replace("Telepon: ", "")
         
         # Website
         info["website"] = safe_get_attribute(driver, 'a[data-item-id="authority"]', "href")
         
-        # --- LOGIKA BARU: AMBIL SHORT LINK ---
+        # --- NEW LOGIC: EXTRACT SHORT LINK ---
         try:
-            # 1. Cari Tombol Share (Bisa bahasa Indo 'Bagikan' atau Inggris 'Share')
-            # Kita cari tombol yang punya data-value="Share" atau icon share
+            # 1. Find Share Button (Looks for 'Share', 'Bagikan', etc.)
             share_btn = driver.find_elements(By.CSS_SELECTOR, "button[data-value='Share'], button[aria-label*='Bagikan'], button[aria-label*='Share']")
             
             if share_btn:
-                # Klik tombol share
+                # Click share button
                 driver.execute_script("arguments[0].click();", share_btn[0])
                 
-                # 2. Tunggu Dialog Muncul & Cari Input Link
-                # Input biasanya ada di dalam dialog modal
+                # 2. Wait for Dialog & Find Input Link
                 wait = WebDriverWait(driver, 3)
                 input_el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog'] input.vrsrZe")))
                 
-                # 3. Ambil value dari input
+                # 3. Get value from input
                 short_link = input_el.get_attribute("value")
                 info["share_link"] = short_link
                 
-                # (Opsional) Tutup dialog dengan tekan ESC atau klik tutup, 
-                # tapi karena kita akan navigasi ke URL lain/quit setelah ini, tidak wajib.
         except Exception as e:
-            # Jangan biarkan error share link menghentikan scraping data lain
+            # Don't let share link errors stop other scraping
             pass
 
     except:
@@ -124,7 +133,7 @@ def extract_business_info(driver):
         
     return info
 
-# --- SCRAPER TAB 1: INPUT LINK LANGSUNG (Updated) ---
+# --- SCRAPER TAB 1: DIRECT LINK INPUT ---
 def scrape_single_url_detailed(url):
     driver = get_driver()
     business = None
@@ -132,7 +141,7 @@ def scrape_single_url_detailed(url):
         driver.get(url)
         time.sleep(4) 
         
-        # Panggil fungsi ekstraksi shared
+        # Call shared extraction function
         details = extract_business_info(driver)
         
         if details:
@@ -150,59 +159,59 @@ def scrape_single_url_detailed(url):
     finally: driver.quit()
     return [business] if business else []
 
-# --- SCRAPER TAB 1: CARI GLOBAL (Deep Search Updated) ---
+# --- SCRAPER TAB 1: GLOBAL SEARCH (Deep Search) ---
 def scrape_search_results(query, city="", country="", lat="", lon="", limit=5):
     """
-    Sekarang melakukan DEEP SCRAPING untuk setiap hasil pencarian.
-    Akan membuka setiap link untuk mengambil detail lengkap.
+    Performs DEEP SCRAPING for each search result.
+    Will open every link to fetch full details.
     """
     results = []
     driver = get_driver(headless=True)
     
-    # Progress Bar di Streamlit (karena proses ini butuh waktu)
+    # Progress Bar in Streamlit
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
-        # 1. Lakukan Pencarian
+        # 1. Perform Search
         full_query = f"{query} {city} {country}".strip()
         encoded_query = full_query.replace(' ', '+')
         base_url = f"https://www.google.com/maps/search/{encoded_query}"
         final_url = f"{base_url}/@{lat},{lon},14z" if lat and lon else base_url
 
-        status_text.text(f"🔍 Mencari '{full_query}'...")
+        status_text.text(f"🔍 Searching for '{full_query}'...")
         driver.get(final_url)
         time.sleep(5)
         
-        # 2. Scroll Feed untuk memuat daftar
+        # 2. Scroll Feed to load list
         for _ in range(3):
             try:
                 driver.execute_script("document.querySelector('div[role=\"feed\"]').scrollBy(0, 2000);")
                 time.sleep(2)
             except: pass
             
-        # 3. Kumpulkan URL Hasil Pencarian
+        # 3. Collect Search Result URLs
         listings = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/maps/place/"]')
         found_urls = []
         for l in listings[:limit]:
             url = l.get_attribute("href")
             if url: found_urls.append(url)
             
-        status_text.text(f"✅ Ditemukan {len(found_urls)} tempat. Mulai mengambil detail...")
+        status_text.text(f"✅ Found {len(found_urls)} places. Starting to extract details...")
         
-        # 4. LOOPING DEEP SCRAPING (Buka satu per satu)
+        # 4. LOOP DEEP SCRAPING (Open one by one)
         for i, url in enumerate(found_urls):
             try:
                 # Update Progress
                 progress = (i + 1) / len(found_urls)
                 progress_bar.progress(progress)
-                status_text.text(f"⏳ Mengambil data {i+1}/{len(found_urls)}...")
+                status_text.text(f"⏳ Extracting data {i+1}/{len(found_urls)}...")
                 
-                # Navigasi ke URL bisnis tersebut
+                # Navigate to business URL
                 driver.get(url)
-                time.sleep(3) # Tunggu loading detail
+                time.sleep(10) # Wait for details to load
                 
-                # Ekstraksi Detail
+                # Extract Details
                 details = extract_business_info(driver)
                 
                 if details:
@@ -218,7 +227,7 @@ def scrape_search_results(query, city="", country="", lat="", lon="", limit=5):
                         scraped_at_utc=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     ))
             except Exception as e:
-                print(f"Gagal scrape {url}: {e}")
+                print(f"Failed to scrape {url}: {e}")
                 continue
                 
     finally:
@@ -233,7 +242,7 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
     seen_texts = set()
     
     # Batch Settings
-    BATCH_SIZE = 10  # Proses per 10 ulasan
+    BATCH_SIZE = 10 
     
     log_area = st.empty()
     logs = []
@@ -245,30 +254,30 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
         log_area.code("\n".join(logs[-15:]), language="log")
 
     driver = get_driver(headless=True)
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 30)
     
     try:
-        update_log(f"Membuka URL...", "info")
+        update_log(f"Opening URL...", "info")
         driver.get(url)
         
         # 1. Dismiss Cookies
         try:
-            WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[aria-label*="Accept"], button[jsname="hZCF7e"]'))
             ).click()
         except: pass
 
         # ============================================================
-        # NAVIGASI TAB (SAMA SEPERTI SEBELUMNYA - SUDAH STABIL)
+        # TAB NAVIGATION
         # ============================================================
-        update_log("Menyiapkan navigasi...", "info")
+        update_log("Preparing navigation...", "info")
         found_tab = False
         
         try:
-            # Tunggu Tablist
+            # Wait for Tablist
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="tablist"]')))
             
-            # Cek Tab Utama
+            # Check Main Tabs
             tabs = driver.find_elements(By.CSS_SELECTOR, 'div[role="tablist"] button[role="tab"]')
             if not tabs: tabs = driver.find_elements(By.CSS_SELECTOR, 'button[role="tab"]')
 
@@ -282,16 +291,16 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
                     
                     if any(w in label for w in REVIEW_WORDS) and not any(b in label for b in BAD_WORDS):
                         if is_selected:
-                            update_log(f"Tab '{label}' sudah aktif.", "success")
+                            update_log(f"Tab '{label}' is already active.", "success")
                             found_tab = True
                         else:
                             driver.execute_script("arguments[0].click();", tab)
                             found_tab = True
-                            update_log(f"Klik Tab: '{label}'", "success")
+                            update_log(f"Clicked Tab: '{label}'", "success")
                             time.sleep(3)
                         break
             
-            # Cek Shortcut jika tab utama gagal
+            # Check Shortcut if main tab fails
             if not found_tab:
                 more_btns = driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='Ulasan'], button[aria-label*='reviews']")
                 for btn in more_btns:
@@ -299,18 +308,18 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
                     if ("lainnya" in lbl or "more" in lbl) and "tulis" not in lbl:
                         driver.execute_script("arguments[0].click();", btn)
                         found_tab = True
-                        update_log(f"Klik Shortcut: '{lbl}'", "success")
+                        update_log(f"Clicked Shortcut: '{lbl}'", "success")
                         time.sleep(3)
                         break
 
         except Exception as e:
-            update_log(f"Navigasi warning: {str(e)}", "warn")
+            update_log(f"Navigation warning: {str(e)}", "warn")
 
-        # 3. CARI PANEL SCROLL & VERIFIKASI
-        update_log("Mencari area scroll...", "info")
+        # 3. FIND SCROLL PANE & VERIFY
+        update_log("Looking for scroll area...", "info")
         pane = None
         
-        # Cek tombol urutkan untuk memastikan kita di page ulasan
+        # Check sort button to ensure we are on reviews page
         try:
             WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'button[aria-label*="Urutkan"], button[data-value="Urutkan"]'))
@@ -333,36 +342,30 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
         if not pane: pane = driver.find_element(By.TAG_NAME, "body")
 
         # ============================================================
-        # 4. SCROLLING & EKSTRAKSI DENGAN LOGIKA BATCH (PER 10)
+        # 4. SCROLLING & EXTRACTION WITH BATCH LOGIC
         # ============================================================
-        update_log(f"Mulai scraping {num_reviews} data (Mode Batch)...", "info")
+        update_log(f"Starting scrape of {num_reviews} reviews (Batch Mode)...", "info")
         
         consecutive_failures = 0
         last_count = 0
         
-        # Loop akan berjalan sampai target tercapai atau error scroll 5x berturut-turut
         while len(reviews_data) < num_reviews:
             
-            # 1. Scroll Kebawah
+            # 1. Scroll Down
             driver.execute_script("arguments[0].scrollBy(0, 4000);", pane)
-            time.sleep(2) # Tunggu loading konten
+            time.sleep(2) # Wait for content load
             
-            # 2. Ambil Kartu
+            # 2. Get Cards
             cards = driver.find_elements(By.CSS_SELECTOR, 'div.jftiEf, div[data-review-id]')
-            
-            # 3. Proses Kartu (Hanya yang baru terlihat di DOM)
-            # Tips: Kita iterate reversed (dari bawah ke atas) agar lebih cepat dapat yang baru
-            # Tapi untuk urutan data, kita tetap append normal
             
             new_in_batch = 0
             
             for card in cards:
-                # Jika kuota terpenuhi, stop loop kartu
                 if len(reviews_data) >= num_reviews: break
                 
                 try:
                     text_content = ""
-                    # Cek Teks
+                    # Check Text
                     text_selectors = ['span.wiI7pd', 'div[data-expandable-section]']
                     for txt_sel in text_selectors:
                         try:
@@ -372,10 +375,10 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
                                 break
                         except: continue
 
-                    # Validasi Unik
+                    # Unique Validation
                     if not text_content or text_content in seen_texts: continue
 
-                    # Klik More jika perlu
+                    # Click More if needed
                     if "..." in text_content:
                         try:
                             more_btn = card.find_element(By.CSS_SELECTOR, "button.kyuRq")
@@ -384,7 +387,7 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
                             text_content = card.find_element(By.CSS_SELECTOR, 'span.wiI7pd').text.strip()
                         except: pass
                     
-                    # Ambil Rating
+                    # Get Rating
                     rating_val = 0
                     try:
                         star_el = card.find_element(By.CSS_SELECTOR, 'span[role="img"]')
@@ -399,114 +402,137 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
                     
                 except: continue
 
-            # 4. LOGIKA BATCH & BREAK
+            # 4. BATCH & BREAK LOGIC
             current_total = len(reviews_data)
             
-            # Cek apakah batch saat ini sudah kelipatan 10 (atau target tercapai)
             if current_total % BATCH_SIZE == 0 and current_total > last_count:
-                update_log(f"📦 Batch Selesai: {current_total}/{num_reviews} ulasan terkumpul.", "success")
-                # ISTIRAHAT SEBENTAR (PENTING AGAR TIDAK CRASH)
+                update_log(f"📦 Batch Complete: {current_total}/{num_reviews} reviews collected.", "success")
                 time.sleep(2) 
             elif current_total != last_count:
                  update_log(f"Progress: {current_total}/{num_reviews}...", "info")
 
-            # Cek Stagnasi (Jika scroll tidak menghasilkan data baru)
+            # Check Stagnation
             if current_total == last_count:
                 consecutive_failures += 1
-                update_log(f"Scroll loading... (Percobaan {consecutive_failures}/5)", "warn")
-                time.sleep(2) # Tunggu lebih lama jika macet
+                update_log(f"Scroll loading... (Attempt {consecutive_failures}/5)", "warn")
+                time.sleep(2)
             else:
-                consecutive_failures = 0 # Reset jika ada data baru
+                consecutive_failures = 0
                 
             last_count = current_total
             
-            # Stop jika macet total 5x scroll berturut-turut
             if consecutive_failures >= 5:
-                update_log("Tidak ada ulasan baru ditemukan. Berhenti.", "warn")
+                update_log("No new reviews found. Stopping.", "warn")
                 break
 
-        update_log(f"🏁 Selesai! {len(reviews_data)} data berhasil diambil.", "success")
+        update_log(f"🏁 Finished! {len(reviews_data)} data successfully collected.", "success")
             
         if len(reviews_data) == 0:
-            update_log("❌ Hasil Kosong. Navigasi gagal atau tidak ada ulasan.", "error")
-            update_log("💡 SARAN: Link mungkin expired. Silakan COPY LINK BARU dari Google Maps.", "warn")
+            update_log("❌ Empty Result. Navigation failed or no reviews.", "error")
+            update_log("💡 SUGGESTION: Link might be expired. Please COPY NEW LINK from Google Maps.", "warn")
         else:
-            update_log(f"🏁 Selesai! {len(reviews_data)} data berhasil diambil.", "success")
+            update_log(f"🏁 Finished! {len(reviews_data)} data successfully collected.", "success")
             
     except Exception as e:
         err = str(e).split("Stacktrace")[0][:100]
         update_log(f"ERROR: {err}", "error")
     finally:
         driver.quit()
-        update_log("Browser ditutup.", "info")
+        update_log("Browser closed.", "info")
     
     return reviews_data
 
 
-# TAMBAHKAN FUNGSI HELPER BARU INI UNTUK ANALISIS KEYWORD:
+# HELPER FUNCTION FOR KEYWORD ANALYSIS
 def get_keywords(text_series):
     all_text = " ".join(text_series).lower()
     all_text = re.sub(r'[^\w\s]', '', all_text)
     tokens = word_tokenize(all_text)
     stops = set(stopwords.words('indonesian') + stopwords.words('english'))
-    custom_stops = {'yg', 'dan', 'di', 'ke', 'dari', 'enak', 'banget', 'tempatnya', 'untuk', 'saya', 'nya', 'ini', 'itu', 'ada', 'juga', 'ga', 'gak', 'mau', 'sih', 'bisa', 'karena', 'tapi'}
+    stops.update(SASTRAWI_STOPS)
+    # Added English stop words to custom list
+    custom_stops = {
+        'yg', 'dan', 'di', 'ke', 'dari', 'enak', 'banget', 'tempatnya', 'untuk', 'saya', 'nya', 
+        'ini', 'itu', 'ada', 'juga', 'ga', 'gak', 'mau', 'sih', 'bisa', 'karena', 'tapi',
+        'the', 'and', 'is', 'to', 'in', 'of', 'it', 'for', 'with', 'on', 'was', 'very', 'place', 'this', 'that'
+    }
     stops.update(custom_stops)
-    filtered = [w for w in tokens if w not in stops and len(w) > 3]
-    return Counter(filtered).most_common(5)
+    filtered_and_stemmed = []
+    for w in tokens:
+        if w not in stops and len(w) > 3:
+            # Apply stemming
+            stemmed_word = STEMMER.stem(w)
+            # Only add if the stemmed word is also not a stopword and long enough
+            if stemmed_word not in stops and len(stemmed_word) > 2:
+                filtered_and_stemmed.append(stemmed_word)
+                
+    return Counter(filtered_and_stemmed).most_common(5)
 
-# --- FUNGSI BARU: ANALISIS MENU MAKANAN ---
+# --- NEW FUNCTION: MENU ANALYSIS ---
 def analyze_menu_mentions(text_series):
     """
-    Mendeteksi kata yang kemungkinan adalah nama makanan/minuman
-    dengan membuang kata sifat, kerja, dan stopwords.
+    Detects nouns likely to be food/drink names by removing adjectives, verbs, and stopwords.
     """
     all_text = " ".join(text_series).lower()
-    # Hapus angka dan simbol
+    # Remove numbers and symbols
     all_text = re.sub(r'[^\w\s]', '', all_text)
     tokens = word_tokenize(all_text)
     
-    # 1. Stopwords Dasar (Indo & English)
+    # 1. Basic Stopwords (Indo & English)
     stops = set(stopwords.words('indonesian') + stopwords.words('english'))
+    stops.update(SASTRAWI_STOPS)
     
-    # 2. Blacklist Kata Umum (Bukan Makanan)
-    # Kita buang kata sifat, tempat, pelayanan, dll.
+    # 2. Blacklist Common Words (Non-Food)
+    # Removing adjectives, places, service, etc. (Includes English equivalents now)
     non_food_words = {
-        # Kata Sambung & Umum
+        # Conjunctions & General
         'yg', 'dan', 'di', 'ke', 'dari', 'ini', 'itu', 'ada', 'juga', 'ga', 'gak', 'tidak', 'mau', 
         'sih', 'bisa', 'karena', 'tapi', 'agak', 'cukup', 'buat', 'sama', 'banyak', 'sedikit',
         'lagi', 'sudah', 'belum', 'kalau', 'kalo', 'untuk', 'bagi', 'pada', 'adalah', 'iya',
+        'the', 'and', 'is', 'to', 'in', 'of', 'it', 'for', 'with', 'on', 'was', 'very', 'but', 'so',
         
-        # Tempat & Fasilitas
+        # Place & Facilities
         'tempat', 'tempatnya', 'lokasi', 'parkir', 'parkiran', 'toilet', 'wc', 'meja', 'kursi', 
         'ruangan', 'lantai', 'ac', 'indoor', 'outdoor', 'kasir', 'mushola', 'area', 'suasana', 
         'view', 'pemandangan', 'jalan', 'akses', 'mobil', 'motor', 'resto', 'cafe', 'warung',
+        'place', 'location', 'parking', 'table', 'chair', 'room', 'floor', 'cashier', 'area', 
+        'atmosphere', 'view', 'road', 'access', 'car', 'bike', 'restaurant',
         
-        # Pelayanan & Orang
+        # Service & People
         'pelayanan', 'pelayan', 'staff', 'karyawan', 'orang', 'mbak', 'mas', 'bapak', 'ibu',
         'satpam', 'waiters', 'owner', 'anak', 'keluarga', 'teman', 'pacar', 'ramah', 'judes',
         'lambat', 'cepat', 'sigap', 'lelet', 'sopan', 'senyum', 'antri', 'antrian',
+        'service', 'waiter', 'waitress', 'employee', 'people', 'man', 'woman', 'security', 
+        'owner', 'kid', 'family', 'friend', 'friendly', 'rude', 'slow', 'fast', 'polite', 'queue',
         
-        # Kata Kerja (Aktivitas)
+        # Verbs (Activities)
         'makan', 'minum', 'beli', 'pesan', 'order', 'bayar', 'tunggu', 'datang', 'pulang', 
         'buka', 'tutup', 'coba', 'nyoba', 'rasa', 'rasanya', 'bawa', 'kasih', 'dapat', 'lihat',
+        'eat', 'drink', 'buy', 'order', 'pay', 'wait', 'come', 'go', 'open', 'close', 'try', 
+        'taste', 'bring', 'give', 'get', 'see',
         
-        # Kata Sifat (Kualitas/Harga)
+        # Adjectives (Quality/Price)
         'enak', 'sedap', 'lezat', 'mantap', 'oke', 'bagus', 'keren', 'jelek', 'parah', 'kecewa',
         'mahal', 'murah', 'terjangkau', 'standar', 'worth', 'bersih', 'kotor', 'bau', 'wangi',
         'panas', 'dingin', 'hangat', 'segar', 'seger', 'manis', 'asin', 'pedas', 'gurih', 
         'pahit', 'hambar', 'empuk', 'keras', 'alot', 'crispy', 'garing', 'lembut',
+        'good', 'delicious', 'tasty', 'nice', 'great', 'bad', 'terrible', 'disappointed',
+        'expensive', 'cheap', 'affordable', 'standard', 'clean', 'dirty', 'smell',
+        'hot', 'cold', 'warm', 'fresh', 'sweet', 'salty', 'spicy', 'savory', 
+        'bitter', 'plain', 'soft', 'hard', 'tough', 'crispy', 'tender',
         
-        # Lainnya
+        # Others
         'bintang', 'star', 'review', 'ulasan', 'rekomendasi', 'recommended', 'banget', 'sekali',
-        'sangat', 'menu', 'makanan', 'minuman', 'daftar', 'harga', 'total', 'porsi', 'potongan'
+        'sangat', 'menu', 'makanan', 'minuman', 'daftar', 'harga', 'total', 'porsi', 'potongan',
+        'stars', 'recommendation', 'very', 'much', 'food', 'drink', 'list', 'price', 'portion'
     }
     
     stops.update(non_food_words)
     
-    # Filter: Ambil kata yang BUKAN stopword dan panjangnya > 2 huruf
+    # Filter: Get words that are NOT stopword and length > 2
     filtered = [w for w in tokens if w not in stops and len(w) > 2]
     
-    # Ambil 10 kata terbanyak
+    # Get top 10 most common
     return Counter(filtered).most_common(10)
 
 def analyze_text_data(reviews):
@@ -514,103 +540,104 @@ def analyze_text_data(reviews):
     all_text = re.sub(r'[^\w\s]', '', all_text)
     tokens = word_tokenize(all_text)
     stops = set(stopwords.words('indonesian') + stopwords.words('english'))
+    stops.update(SASTRAWI_STOPS)
     custom_stops = {'yg', 'dan', 'di', 'ke', 'dari', 'enak', 'banget', 'tempatnya', 'untuk', 'saya', 'nya', 'ini', 'itu', 'ada', 'juga', 'ga', 'gak', 'mau', 'sih', 'bisa', 'karena', 'tapi', 'agak', 'cukup'}
     stops.update(custom_stops)
     filtered_words = [w for w in tokens if w not in stops and len(w) > 3]
     word_counts = Counter(filtered_words).most_common(15)
     return word_counts
 
-# --- UI STREAMLIT ---
-st.title("📍 MapInsight Pro (Final Version)")
-st.markdown("Aplikasi analisis bisnis Google Maps.")
+# --- STREAMLIT UI ---
+st.title("📍 MapInsight Pro — Places & Reviews")
+st.markdown("Google Maps places & reviews analysis — businesses, restaurants, shops.")
 
-tab1, tab2 = st.tabs(["🔍 Cari Bisnis / Link Detail", "📊 Review Analyzer & Logger"])
+tab1, tab2 = st.tabs(["🔍 Search Places / Link Detail", "📊 Review Analyzer & Logger"])
 
 # === TAB 1 UI ===
 with tab1:
-    st.markdown("### 🏢 Database Bisnis")
-    mode = st.radio("Metode Input:", ["🔗 Input Link Spesifik", "🔎 Cari Global (Deep Search)"], horizontal=True)
+    st.markdown("### 📚 Places Database")
+    mode = st.radio("Input Method:", ["🔗 Specific Link Input", "🔎 Global Search (Deep Search)"], horizontal=True)
     data = [] 
 
-    if mode == "🔗 Input Link Spesifik":
-        st.info("Masukkan link Google Maps (Shortlink/Longlink) untuk mengambil data detail satu tempat.")
+    if mode == "🔗 Specific Link Input":
+        st.info("Enter Google Maps link (Shortlink/Longlink) to fetch detailed data for one place.")
         direct_url = st.text_input("Paste Link:", placeholder="https://maps.app.goo.gl/...")
         
-        if st.button("Ambil Data Detail", type="primary"):
+        if st.button("Fetch Detailed Data", type="primary"):
             if not direct_url:
-                st.warning("Link kosong.")
+                st.warning("Link is empty.")
             else:
-                with st.spinner("Mengakses link dan mengekstrak data..."):
+                with st.spinner("Accessing link and extracting data..."):
                     data = scrape_single_url_detailed(direct_url)
 
     else:
-        st.info("Mencari daftar bisnis dan **mengambil detail lengkap** (Alamat, Telp, Rating) untuk setiap hasil.")
+        st.info("Search for places (businesses, restaurants, shops) and **fetch full details** (Address, Phone, Rating) for each result.")
         col1, col2 = st.columns([3, 1])
-        q_in = col1.text_input("Kata Kunci (e.g. Cafe)", key="q1")
-        lim_in = col2.number_input("Limit Hasil", 1, 20, 5, key="l1")
+        q_in = col1.text_input("Keywords (e.g. Cafe)", key="q1")
+        lim_in = col2.number_input("Limit Results", 1, 20, 5, key="l1")
         
         col3, col4 = st.columns(2)
-        city_in = col3.text_input("Kota (Opsional)", key="c1")
-        country_in = col4.text_input("Negara (Opsional)", key="co1")
+        city_in = col3.text_input("City (Optional)", key="c1")
+        country_in = col4.text_input("Country (Optional)", key="co1")
         
-        if st.button("Jalankan Pencarian", type="primary"):
+        if st.button("Run Search", type="primary"):
             if not q_in:
-                st.warning("Masukkan kata kunci.")
+                st.warning("Enter keywords.")
             else:
-                # Fungsi scrape_search_results sekarang sudah ada progress bar di dalamnya
+                # Scrape function already has progress bar
                 data = scrape_search_results(q_in, city=city_in, country=country_in, limit=lim_in)
 
-    # --- MENAMPILKAN HASIL TAB 1 ---
+    # --- DISPLAY RESULTS TAB 1 ---
     if data:
-        st.success(f"Berhasil mengumpulkan {len(data)} data bisnis lengkap!")
+        st.success(f"Successfully collected {len(data)} place records!")
         df = pd.DataFrame([asdict(b) for b in data])
         
-        # Tampilkan Tabel dengan Kolom Lengkap
+        # Display Table with Full Columns
         st.dataframe(
             df, 
             column_config={
-                "name": "Nama Bisnis",
-                "category": "Kategori",
+                "name": "Place Name",
+                "category": "Category",
                 "rating": "⭐ Rating",
-                "phone": "📞 Telepon",
-                "address": "🏠 Alamat",
+                "phone": "📞 Phone",
+                "address": "🏠 Address",
                 "url": st.column_config.LinkColumn("Maps Link"), 
                 "share_link": st.column_config.LinkColumn("🔗 Short Link (Share)"),
                 "website": st.column_config.LinkColumn("Website")
             },
             width="stretch" 
         )
-        st.info("💡 Tips: Salin URL dari tabel di atas untuk melakukan analisis ulasan mendalam di Tab 2.")
+        st.info("💡 Tip: Copy URL from the table above to perform deep review analysis in Tab 2.")
 
 with tab2:
-    st.header("Analisis Sentimen Berbasis Bintang")
+    st.header("Star-Based Sentiment Analysis")
     
     col_in, col_opt = st.columns([3, 1])
-    target_url = col_in.text_input("URL Google Maps:", placeholder="Paste link di sini...")
-    num_rev = col_opt.number_input("Jml Ulasan", 10, 500, 30, step=10)
+    target_url = col_in.text_input("Google Maps URL:", placeholder="Paste link here...")
+    num_rev = col_opt.number_input("Num Reviews", 10, 500, 30, step=10)
     
-    if st.button("🚀 Mulai Analisis"):
+    if st.button("🚀 Start Analysis"):
         if not target_url:
-            st.warning("Masukkan URL.")
+            st.warning("Enter URL.")
         else:
             st.subheader("1. Live Log")
-            # Jalankan Scraper
+            # Run Scraper
             raw_data = scrape_reviews_with_ratings(target_url, num_rev)
             
-            # CEK APAKAH DATA ADA ATAU KOSONG
+            # CHECK IF DATA EXISTS OR EMPTY
             if raw_data:
                 df_rev = pd.DataFrame(raw_data)
                 
                 st.divider()
-                st.subheader("2. Dashboard Analisis")
+                st.subheader("2. Analysis Dashboard")
                 
-                st.write("### 📊 Distribusi Kepuasan")
+                st.write("### 📊 Satisfaction Distribution")
                 rating_counts = df_rev['rating'].value_counts().sort_index()
                 st.bar_chart(rating_counts, color="#FFC107")
                 
-                st.write("### 🧠 Analisis Kata Kunci per Rating")
+                st.write("### 🧠 Keyword Analysis per Rating")
                 
-                # Buat Tab untuk setiap Bintang
+                # Create Tab for each Star
                 star_tabs = st.tabs(["⭐ 1", "⭐ 2", "⭐ 3", "⭐ 4", "⭐ 5"])
                 
                 for i, star_tab in enumerate(star_tabs):
@@ -619,55 +646,55 @@ with tab2:
                     
                     with star_tab:
                         if subset.empty:
-                            st.info(f"Belum ada data ulasan bintang {star_val}.")
+                            st.info(f"No review data for {star_val} star(s).")
                         else:
-                            st.metric("Jumlah Ulasan", len(subset))
+                            st.metric("Total Reviews", len(subset))
                             
-                            # Analisis Keyword Umum
+                            # General Keyword Analysis
                             keywords = get_keywords(subset['text'])
-                            kw_df = pd.DataFrame(keywords, columns=['Kata Kunci', 'Frekuensi'])
+                            kw_df = pd.DataFrame(keywords, columns=['Keyword', 'Frequency'])
                             
                             col_a, col_b = st.columns(2)
                             
                             with col_a:
-                                st.write("**Topik Umum:**")
-                                st.dataframe(kw_df, use_container_width=True, hide_index=True)
+                                st.write("**General Topics:**")
+                                st.dataframe(kw_df, width="stretch", hide_index=True)
                                 
                             with col_b:
-                                st.write("**Contoh Ulasan:**")
+                                st.write("**Review Examples:**")
                                 for txt in subset['text'].head(3):
                                     st.caption(f"💬 \"{txt[:150]}...\"")
 
-                            # --- FITUR BARU: EXPANDER DETEKSI MENU ---
-                            with st.expander(f"🍽️ Lihat Menu/Makanan yang sering disebut di Bintang {star_val}"):
-                                st.caption("Sistem mendeteksi kata benda yang kemungkinan adalah nama makanan/minuman.")
+                            # --- MENU DETECTION EXPANDER ---
+                            with st.expander(f"🍽️ View Menu/Food mentioned in ⭐ {star_val}"):
+                                st.caption("System detects nouns likely to be food/drink names.")
                                 
-                                # Panggil fungsi analisis menu baru
+                                # Call menu analysis function
                                 menu_items = analyze_menu_mentions(subset['text'])
                                 
                                 if menu_items:
-                                    menu_df = pd.DataFrame(menu_items, columns=['Nama Menu', 'Disebut (Kali)'])
+                                    menu_df = pd.DataFrame(menu_items, columns=['Menu Name', 'Mentioned (Times)'])
                                     
-                                    # Tampilkan dengan format Bar Chart horizontal agar beda
-                                    st.dataframe(menu_df, use_container_width=True, hide_index=True)
+                                    # Display with Horizontal Bar Chart format
+                                    st.dataframe(menu_df, width="stretch", hide_index=True)
                                     
-                                    # Opsional: Tampilkan chart kecil
-                                    st.bar_chart(menu_df.set_index('Nama Menu'), color="#4CAF50") # Warna hijau utk makanan
+                                    # Optional: Display small chart
+                                    st.bar_chart(menu_df.set_index('Menu Name'), color="#4CAF50") # Green for food
                                 else:
-                                    st.warning("Tidak ditemukan nama menu yang spesifik pada rating ini.")
+                                    st.warning("No specific menu names found in this rating.")
 
-                with st.expander("📄 Lihat Data Mentah"):
-                    st.dataframe(df_rev, use_container_width=True)
+                with st.expander("📄 View Raw Data"):
+                    st.dataframe(df_rev, width="stretch")
 
             else:
-                # INI BAGIAN PESAN ERROR "GANTI LINK"
-                st.error("⚠️ Gagal mengambil data ulasan (0 Data).")
+                # ERROR MESSAGE SECTION
+                st.error("⚠️ Failed to fetch review data (0 Data).")
                 st.warning("""
-                **Kemungkinan penyebab:**
-                1. **Link Expired/Rusak:** Link Google Maps (terutama shortlink/proxy) sering kadaluarsa.
-                2. **Salah Halaman:** Link tidak mengarah ke profil bisnis yang benar.
-                
-                **👉 SOLUSI: Buka Google Maps lagi, cari tempatnya, Copy Link yang baru, dan coba lagi.**
+                **Possible causes:**
+                1. **Link Expired/Broken:** Google Maps links (especially shortlinks/proxies) often expire.
+                2. **Wrong Page:** Link does not point to a correct business profile.
+
+                **👉 SOLUTION: Open Google Maps by link, find the share button, Copy Short Link, and Paste it again.**
                 """)
 # FOOTER
 st.markdown("---")
