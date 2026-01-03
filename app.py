@@ -17,36 +17,30 @@ from Sastrawi.Stemmer.StemmerFactory import StemmerFactory
 from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 from dataclasses import dataclass, asdict
 
-# --- INITIAL CONFIGURATION ---
 st.set_page_config(page_title="MapInsight Pro — Places & Reviews", layout="wide")
 
-# Logger Configuration
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler(sys.stdout)])
 log = logging.getLogger("scraper")
 
-# Initialize NLTK
 @st.cache_resource
 def init_nlp_resources():
     try:
         nltk.download('stopwords', quiet=True)
         nltk.download('punkt', quiet=True)
         nltk.download('punkt_tab', quiet=True)
-    except LookupError: pass
+    except LookupError:
+        pass
 
-    # 2. SASTRAWI
-    # Stemmer is heavy, so we cache it
     stemmer_factory = StemmerFactory()
     stemmer = stemmer_factory.create_stemmer()
-    
-    # Sastrawi Stopwords (Excellent for Indonesian)
+
     stop_factory = StopWordRemoverFactory()
     sastrawi_stops = set(stop_factory.get_stop_words())
-    
+
     return stemmer, sastrawi_stops
 
 STEMMER, SASTRAWI_STOPS = init_nlp_resources()
 
-# Business Data Class
 @dataclass
 class Business:
     name: str = ""
@@ -55,125 +49,101 @@ class Business:
     address: str = ""
     phone: str = ""
     website: str = ""
-    url: str = ""          # Long Link (Browser URL)
-    share_link: str = ""   # Short Link (maps.app.goo.gl)
+    url: str = ""
+    share_link: str = ""
     scraped_at_utc: str = ""
 
-# Review Keywords (Kept multi-language for scraping robustness)
-REVIEW_WORDS = {
-    "ulasan", "reviews", "review", "tinjauan", "reseñas", "avis", "bewertungen", "recensioni"
-}
+REVIEW_WORDS = {"ulasan", "reviews", "review", "tinjauan", "reseñas", "avis", "bewertungen", "recensioni"}
 BAD_WORDS = {"tulis", "write", "nulis", "add", "tambahkan", "crear", "schreiben"}
 
-# --- HELPER FUNCTIONS ---
 def get_driver(headless=True):
     driver = Driver(uc=True, headless=headless, incognito=True)
     driver.set_window_size(1400, 900)
     return driver
 
 def safe_get_text(driver, selector):
-    try: return driver.find_element(By.CSS_SELECTOR, selector).text.strip()
-    except: return ""
+    try:
+        return driver.find_element(By.CSS_SELECTOR, selector).text.strip()
+    except:
+        return ""
 
 def safe_get_attribute(driver, selector, attr):
-    try: return driver.find_element(By.CSS_SELECTOR, selector).get_attribute(attr)
-    except: return ""
+    try:
+        return driver.find_element(By.CSS_SELECTOR, selector).get_attribute(attr)
+    except:
+        return ""
 
 def extract_business_info(driver):
     """Extracts business details INCLUDING Short Link from the Share button"""
-    info = {
-        "name": "", "rating": "", "category": "", 
-        "address": "", "phone": "", "website": "", "share_link": ""
-    }
-    
+    info = {"name": "", "rating": "", "category": "", "address": "", "phone": "", "website": "", "share_link": ""}
+
     try:
-        # Wait for Business Name
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "h1.DUwDvf")))
-        
+
         info["name"] = safe_get_text(driver, "h1.DUwDvf")
         info["rating"] = safe_get_text(driver, "div.F7nice span[aria-hidden='true']")
         info["category"] = safe_get_text(driver, "button.DkEaL")
-        
-        # Address
+
         address = safe_get_attribute(driver, 'button[data-item-id="address"]', "aria-label")
         if address:
             info["address"] = address.replace("Address: ", "").replace("Alamat: ", "")
-        
-        # Phone
+
         phone = safe_get_attribute(driver, 'button[data-item-id*="phone"]', "aria-label")
         if phone:
             info["phone"] = phone.replace("Phone: ", "").replace("Telepon: ", "")
-        
-        # Website
+
         info["website"] = safe_get_attribute(driver, 'a[data-item-id="authority"]', "href")
-        
-        # --- NEW LOGIC: EXTRACT SHORT LINK ---
+
         try:
-            # 1. Find Share Button (Looks for 'Share', 'Bagikan', etc.)
             share_btn = driver.find_elements(By.CSS_SELECTOR, "button[data-value='Share'], button[aria-label*='Bagikan'], button[aria-label*='Share']")
-            
             if share_btn:
-                # Click share button
                 driver.execute_script("arguments[0].click();", share_btn[0])
-                
-                # 2. Wait for Dialog & Find Input Link
                 wait = WebDriverWait(driver, 3)
                 input_el = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='dialog'] input.vrsrZe")))
-                
-                # 3. Get value from input
                 short_link = input_el.get_attribute("value")
                 info["share_link"] = short_link
-                
-        except Exception as e:
-            # Don't let share link errors stop other scraping
+        except Exception:
             pass
 
     except:
         return None
-        
+
     return info
 
-# --- SCRAPER TAB 1: DIRECT LINK INPUT ---
 def scrape_single_url_detailed(url):
     driver = get_driver()
     business = None
     try:
         driver.get(url)
-        time.sleep(4) 
-        
-        # Call shared extraction function
+        time.sleep(4)
+
         details = extract_business_info(driver)
-        
+
         if details:
             business = Business(
-                name=details['name'], 
-                rating=details['rating'], 
-                category=details['category'], 
-                address=details['address'], 
+                name=details['name'],
+                rating=details['rating'],
+                category=details['category'],
+                address=details['address'],
                 phone=details['phone'],
-                website=details['website'], 
+                website=details['website'],
                 url=driver.current_url,
                 share_link=details['share_link'],
-                scraped_at_utc=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                scraped_at_utc=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             )
-    finally: driver.quit()
+    finally:
+        driver.quit()
     return [business] if business else []
 
-# --- SCRAPER TAB 1: GLOBAL SEARCH (Deep Search) ---
 def scrape_search_results(query, city="", country="", lat="", lon="", limit=5):
-    """
-    Performs DEEP SCRAPING for each search result.
-    Will open every link to fetch full details.
-    """
+    """Performs deep scraping for each search result and returns detailed Business objects."""
     results = []
     driver = get_driver(headless=True)
-    
-    # Progress Bar in Streamlit
+
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
+
     try:
-        # 1. Perform Search
         full_query = f"{query} {city} {country}".strip()
         encoded_query = full_query.replace(' ', '+')
         base_url = f"https://www.google.com/maps/search/{encoded_query}"
@@ -182,38 +152,34 @@ def scrape_search_results(query, city="", country="", lat="", lon="", limit=5):
         status_text.text(f"🔍 Searching for '{full_query}'...")
         driver.get(final_url)
         time.sleep(5)
-        
-        # 2. Scroll Feed to load list
+
         for _ in range(3):
             try:
                 driver.execute_script("document.querySelector('div[role=\"feed\"]').scrollBy(0, 2000);")
                 time.sleep(2)
-            except: pass
-            
-        # 3. Collect Search Result URLs
+            except:
+                pass
+
         listings = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/maps/place/"]')
         found_urls = []
         for l in listings[:limit]:
             url = l.get_attribute("href")
-            if url: found_urls.append(url)
-            
+            if url:
+                found_urls.append(url)
+
         status_text.text(f"✅ Found {len(found_urls)} places. Starting to extract details...")
-        
-        # 4. LOOP DEEP SCRAPING (Open one by one)
+
         for i, url in enumerate(found_urls):
             try:
-                # Update Progress
                 progress = (i + 1) / len(found_urls)
                 progress_bar.progress(progress)
                 status_text.text(f"⏳ Extracting data {i+1}/{len(found_urls)}...")
-                
-                # Navigate to business URL
+
                 driver.get(url)
-                time.sleep(10) # Wait for details to load
-                
-                # Extract Details
+                time.sleep(10)
+
                 details = extract_business_info(driver)
-                
+
                 if details:
                     results.append(Business(
                         name=details['name'],
@@ -224,26 +190,25 @@ def scrape_search_results(query, city="", country="", lat="", lon="", limit=5):
                         website=details['website'],
                         url=url,
                         share_link=details['share_link'],
-                        scraped_at_utc=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                        scraped_at_utc=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                     ))
             except Exception as e:
                 print(f"Failed to scrape {url}: {e}")
                 continue
-                
+
     finally:
         driver.quit()
         progress_bar.empty()
         status_text.empty()
-        
+
     return results
 
 def scrape_reviews_with_ratings(url, num_reviews=30):
-    reviews_data = [] 
+    reviews_data = []
     seen_texts = set()
-    
-    # Batch Settings
-    BATCH_SIZE = 10 
-    
+
+    BATCH_SIZE = 10
+
     log_area = st.empty()
     logs = []
 
@@ -255,40 +220,38 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
 
     driver = get_driver(headless=True)
     wait = WebDriverWait(driver, 30)
-    
+
     try:
-        update_log(f"Opening URL...", "info")
+        update_log("Opening URL...", "info")
         driver.get(url)
-        
-        # 1. Dismiss Cookies
+
         try:
             WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[aria-label*="Accept"], button[jsname="hZCF7e"]'))
             ).click()
-        except: pass
+        except:
+            pass
 
-        # ============================================================
-        # TAB NAVIGATION
-        # ============================================================
         update_log("Preparing navigation...", "info")
         found_tab = False
-        
+
         try:
-            # Wait for Tablist
             wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'div[role="tablist"]')))
-            
-            # Check Main Tabs
+
             tabs = driver.find_elements(By.CSS_SELECTOR, 'div[role="tablist"] button[role="tab"]')
-            if not tabs: tabs = driver.find_elements(By.CSS_SELECTOR, 'button[role="tab"]')
+            if not tabs:
+                tabs = driver.find_elements(By.CSS_SELECTOR, 'button[role="tab"]')
 
             if tabs:
-                try: tabs.sort(key=lambda x: int(x.get_attribute("data-tab-index") or 99))
-                except: pass
+                try:
+                    tabs.sort(key=lambda x: int(x.get_attribute("data-tab-index") or 99))
+                except:
+                    pass
 
                 for tab in tabs:
                     label = (tab.get_attribute("aria-label") or tab.text or "").lower()
                     is_selected = tab.get_attribute("aria-selected") == "true"
-                    
+
                     if any(w in label for w in REVIEW_WORDS) and not any(b in label for b in BAD_WORDS):
                         if is_selected:
                             update_log(f"Tab '{label}' is already active.", "success")
@@ -299,8 +262,7 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
                             update_log(f"Clicked Tab: '{label}'", "success")
                             time.sleep(3)
                         break
-            
-            # Check Shortcut if main tab fails
+
             if not found_tab:
                 more_btns = driver.find_elements(By.CSS_SELECTOR, "button[aria-label*='Ulasan'], button[aria-label*='reviews']")
                 for btn in more_btns:
@@ -315,16 +277,15 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
         except Exception as e:
             update_log(f"Navigation warning: {str(e)}", "warn")
 
-        # 3. FIND SCROLL PANE & VERIFY
         update_log("Looking for scroll area...", "info")
         pane = None
-        
-        # Check sort button to ensure we are on reviews page
+
         try:
             WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.CSS_SELECTOR, 'button[aria-label*="Urutkan"], button[data-value="Urutkan"]'))
             )
-        except: pass
+        except:
+            pass
 
         target_pane_selector = 'div.m6QErb.DxyBCb.kA9KIf.dS8AEf'
         try:
@@ -337,35 +298,31 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
                     if elems:
                         pane = elems[0]
                         break
-                except: continue
+                except:
+                    continue
 
-        if not pane: pane = driver.find_element(By.TAG_NAME, "body")
+        if not pane:
+            pane = driver.find_element(By.TAG_NAME, "body")
 
-        # ============================================================
-        # 4. SCROLLING & EXTRACTION WITH BATCH LOGIC
-        # ============================================================
         update_log(f"Starting scrape of {num_reviews} reviews (Batch Mode)...", "info")
-        
+
         consecutive_failures = 0
         last_count = 0
-        
+
         while len(reviews_data) < num_reviews:
-            
-            # 1. Scroll Down
             driver.execute_script("arguments[0].scrollBy(0, 4000);", pane)
-            time.sleep(2) # Wait for content load
-            
-            # 2. Get Cards
+            time.sleep(2)
+
             cards = driver.find_elements(By.CSS_SELECTOR, 'div.jftiEf, div[data-review-id]')
-            
+
             new_in_batch = 0
-            
+
             for card in cards:
-                if len(reviews_data) >= num_reviews: break
-                
+                if len(reviews_data) >= num_reviews:
+                    break
+
                 try:
                     text_content = ""
-                    # Check Text
                     text_selectors = ['span.wiI7pd', 'div[data-expandable-section]']
                     for txt_sel in text_selectors:
                         try:
@@ -373,73 +330,74 @@ def scrape_reviews_with_ratings(url, num_reviews=30):
                             if el.text.strip():
                                 text_content = el.text.strip()
                                 break
-                        except: continue
+                        except:
+                            continue
 
-                    # Unique Validation
-                    if not text_content or text_content in seen_texts: continue
+                    if not text_content or text_content in seen_texts:
+                        continue
 
-                    # Click More if needed
                     if "..." in text_content:
                         try:
                             more_btn = card.find_element(By.CSS_SELECTOR, "button.kyuRq")
                             driver.execute_script("arguments[0].click();", more_btn)
                             time.sleep(0.2)
                             text_content = card.find_element(By.CSS_SELECTOR, 'span.wiI7pd').text.strip()
-                        except: pass
-                    
-                    # Get Rating
+                        except:
+                            pass
+
                     rating_val = 0
                     try:
                         star_el = card.find_element(By.CSS_SELECTOR, 'span[role="img"]')
                         label_rating = star_el.get_attribute("aria-label")
                         match = re.search(r'\d+', label_rating)
-                        if match: rating_val = int(match.group())
-                    except: pass
+                        if match:
+                            rating_val = int(match.group())
+                    except:
+                        pass
 
                     seen_texts.add(text_content)
                     reviews_data.append({"rating": rating_val, "text": text_content})
                     new_in_batch += 1
-                    
-                except: continue
 
-            # 4. BATCH & BREAK LOGIC
+                except:
+                    continue
+
             current_total = len(reviews_data)
-            
+
             if current_total % BATCH_SIZE == 0 and current_total > last_count:
                 update_log(f"📦 Batch Complete: {current_total}/{num_reviews} reviews collected.", "success")
-                time.sleep(2) 
+                time.sleep(2)
             elif current_total != last_count:
-                 update_log(f"Progress: {current_total}/{num_reviews}...", "info")
+                update_log(f"Progress: {current_total}/{num_reviews}...", "info")
 
-            # Check Stagnation
             if current_total == last_count:
                 consecutive_failures += 1
                 update_log(f"Scroll loading... (Attempt {consecutive_failures}/5)", "warn")
                 time.sleep(2)
             else:
                 consecutive_failures = 0
-                
+
             last_count = current_total
-            
+
             if consecutive_failures >= 5:
                 update_log("No new reviews found. Stopping.", "warn")
                 break
 
         update_log(f"🏁 Finished! {len(reviews_data)} data successfully collected.", "success")
-            
+
         if len(reviews_data) == 0:
             update_log("❌ Empty Result. Navigation failed or no reviews.", "error")
             update_log("💡 SUGGESTION: Link might be expired. Please COPY NEW LINK from Google Maps.", "warn")
         else:
             update_log(f"🏁 Finished! {len(reviews_data)} data successfully collected.", "success")
-            
+
     except Exception as e:
         err = str(e).split("Stacktrace")[0][:100]
         update_log(f"ERROR: {err}", "error")
     finally:
         driver.quit()
         update_log("Browser closed.", "info")
-    
+
     return reviews_data
 
 
