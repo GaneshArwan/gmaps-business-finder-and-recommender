@@ -1,5 +1,5 @@
-streamlit
-seleniumbase
-pandas
-nltk
-Sastrawi
+streamlit>=1.40.0,<2.0.0
+seleniumbase>=4.33.0
+pandas>=2.2.0
+nltk>=3.9.1
+Sastrawi>=1.0.1
